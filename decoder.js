@@ -10,7 +10,6 @@
  * - Universal Factory AES Key: '#@Trl2018-lespl$' (identical across all Treel TPMS sensors)
  */
 
-// Universal factory encryption key used by all Treel TPMS sensors
 const TREEL_AES_KEY = '#@Trl2018-lespl$';
 
 const TREEL_BEACON_UUID_HEX = 'ffffffffffffffffffffffffffffffe0';
@@ -106,29 +105,16 @@ function decryptAesEcbBlock(cipherBytes) {
         const decrypted = ecb.decrypt(slice);
         return decrypted;
     } catch (err) {
-        console.warn('AES decrypt error:', err);
         return null;
     }
 }
 
 /**
  * Decodes encrypted Treel TPMS GATT payload (Mode 2)
- * Decrypted byte layout:
- * [0]     : 0x16 (Tag type)
- * [1..2]  : Surface Temp (°C * 100, Little-Endian)
- * [3..4]  : Pressure (PSI * 100, Little-Endian)
- * [5]     : Battery % (0..100)
- * [6]     : Flags
- * [7]     : Tire Temp Count
- * [8]     : Tag Count
- * [9]     : Impact Count
- * [10..11]: VibX (g-force * 1000, signed LE)
- * [12..13]: VibZ (g-force * 1000, signed LE)
  */
 function decodeGattMode(payload) {
     if (!payload || payload.length < 16) return null;
 
-    // Scan through all 16-byte blocks
     for (let offset = 0; offset <= payload.length - 16; offset++) {
         const block = payload.slice(offset, offset + 16);
         const dec = decryptAesEcbBlock(block);
@@ -144,7 +130,6 @@ function decodeGattMode(payload) {
 
         const battery = dec[5] & 0xFF;
 
-        // Plausibility check
         if (tempC >= -40 && tempC <= 125 && pressurePsi >= 0 && pressurePsi <= 217 && battery <= 100) {
             const rawVibX = (dec[10] | (dec[11] << 8)) << 16 >> 16;
             const rawVibZ = (dec[12] | (dec[13] << 8)) << 16 >> 16;
@@ -235,7 +220,7 @@ function bufferContainsReversedSignature(buf, sig) {
 /**
  * Matches an incoming BLE packet against configured TPMS modules
  */
-function matchModuleForPacket(packet, modules) {
+function matchModuleForPacket(packet, modules, decoded) {
     if (!modules || !modules.length) return null;
 
     const deviceId = (packet.deviceId || '').toUpperCase();
@@ -271,9 +256,13 @@ function matchModuleForPacket(packet, modules) {
             }
         }
 
-        // 4. In case the MAC string itself appears in ASCII in advertisement
-        if (packet.asciiDump && (packet.asciiDump.includes(shortId) || packet.asciiDump.includes(cleanMac))) {
-            return mod;
+        // 4. Decoded sensor ID match
+        if (decoded && decoded.sensorId) {
+            const cleanSensorId = decoded.sensorId.replace(/[^0-9A-F]/g, '');
+            if (cleanMac.includes(cleanSensorId) || cleanSensorId.includes(cleanMac) ||
+                cleanSensorId.includes(shortId)) {
+                return mod;
+            }
         }
     }
 
@@ -292,7 +281,6 @@ function parseTreelQrCode(qrText) {
         shortId: ''
     };
 
-    // Try parsing JSON if formatted that way
     if (text.startsWith('{') && text.endsWith('}')) {
         try {
             const parsed = JSON.parse(text);
@@ -302,20 +290,17 @@ function parseTreelQrCode(qrText) {
         } catch (e) {}
     }
 
-    // Match 6 pairs of hex digits (MAC address: XX:XX:XX:XX:XX:XX or XX-XX-XX-XX-XX-XX), with optional MAC: prefix
     const macRegex = /(?:MAC[:=\s]*)?([0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5})/i;
     const macMatch = text.match(macRegex);
     if (macMatch) {
         result.mac = normalizeMac(macMatch[1]);
     } else {
-        // Look for 12 contiguous hex characters
         const hex12 = text.match(/(?:^|[^0-9A-Fa-f])([0-9A-Fa-f]{12})(?:$|[^0-9A-Fa-f])/);
         if (hex12) {
             result.mac = normalizeMac(hex12[1]);
         }
     }
 
-    // Look for 6-char short ID if no full MAC found
     if (!result.mac) {
         const hex6 = text.match(/\b([0-9A-Fa-f]{6})\b/);
         if (hex6) {
@@ -328,66 +313,156 @@ function parseTreelQrCode(qrText) {
 }
 
 /**
+ * Extracts raw byte buffers and debug info from Web Bluetooth advertisement
+ */
+function extractAdvertisementBuffers(rawPacket) {
+    const buffers = [];
+    const allBytes = [];
+    const debugEntries = [];
+
+    // 1. Process BluetoothManufacturerDataMap (Map object)
+    if (rawPacket.manufacturerData) {
+        const handleMfgEntry = (dataView, companyId) => {
+            if (!dataView) return;
+            const offset = dataView.byteOffset || 0;
+            const length = dataView.byteLength != null ? dataView.byteLength : dataView.buffer.byteLength;
+            const bytes = new Uint8Array(dataView.buffer, offset, length);
+
+            // Raw manufacturer data payload
+            buffers.push(bytes);
+
+            // Also create full packet with 2-byte Company ID header
+            const cId = Number(companyId) || 0;
+            const withCompanyId = new Uint8Array(2 + bytes.length);
+            withCompanyId[0] = cId & 0xff;
+            withCompanyId[1] = (cId >> 8) & 0xff;
+            withCompanyId.set(bytes, 2);
+            buffers.push(withCompanyId);
+
+            allBytes.push(...withCompanyId);
+
+            const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+            debugEntries.push(`Mfg 0x${cId.toString(16).padStart(4, '0')} (${bytes.length}B): ${hex}`);
+        };
+
+        if (typeof rawPacket.manufacturerData.forEach === 'function') {
+            rawPacket.manufacturerData.forEach(handleMfgEntry);
+        } else if (rawPacket.manufacturerData.entries) {
+            for (const [id, dv] of rawPacket.manufacturerData.entries()) {
+                handleMfgEntry(dv, id);
+            }
+        } else if (typeof rawPacket.manufacturerData === 'object') {
+            for (const [id, dv] of Object.entries(rawPacket.manufacturerData)) {
+                handleMfgEntry(dv, id);
+            }
+        }
+    }
+
+    // 2. Process BluetoothServiceDataMap (Map object)
+    if (rawPacket.serviceData) {
+        const handleServiceEntry = (dataView, uuid) => {
+            if (!dataView) return;
+            const offset = dataView.byteOffset || 0;
+            const length = dataView.byteLength != null ? dataView.byteLength : dataView.buffer.byteLength;
+            const bytes = new Uint8Array(dataView.buffer, offset, length);
+
+            buffers.push(bytes);
+            allBytes.push(...bytes);
+
+            const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+            debugEntries.push(`Service ${uuid} (${bytes.length}B): ${hex}`);
+        };
+
+        if (typeof rawPacket.serviceData.forEach === 'function') {
+            rawPacket.serviceData.forEach(handleServiceEntry);
+        } else if (rawPacket.serviceData.entries) {
+            for (const [uuid, dv] of rawPacket.serviceData.entries()) {
+                handleServiceEntry(dv, uuid);
+            }
+        } else if (typeof rawPacket.serviceData === 'object') {
+            for (const [uuid, dv] of Object.entries(rawPacket.serviceData)) {
+                handleServiceEntry(dv, uuid);
+            }
+        }
+    }
+
+    // 3. Fallback for rawBytes array
+    if (rawPacket.rawBytes) {
+        const bytes = new Uint8Array(rawPacket.rawBytes);
+        buffers.push(bytes);
+        allBytes.push(...bytes);
+        debugEntries.push(`Raw (${bytes.length}B): ${Array.from(bytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ')}`);
+    }
+
+    return {
+        buffers,
+        allBytes: new Uint8Array(allBytes),
+        debugEntries
+    };
+}
+
+/**
  * Master parser for any BLE advertisement packet
  */
 function processBlePacket(rawPacket, modules) {
-    let allBytes = [];
-
-    if (rawPacket.manufacturerData) {
-        for (const [mfgId, dataView] of Object.entries(rawPacket.manufacturerData)) {
-            const arr = new Uint8Array(dataView.buffer || dataView);
-            allBytes.push(...arr);
-        }
-    }
-
-    if (rawPacket.serviceData) {
-        for (const [uuid, dataView] of Object.entries(rawPacket.serviceData)) {
-            const arr = new Uint8Array(dataView.buffer || dataView);
-            allBytes.push(...arr);
-        }
-    }
-
-    if (rawPacket.rawBytes) {
-        allBytes.push(...rawPacket.rawBytes);
-    }
+    const extracted = extractAdvertisementBuffers(rawPacket);
 
     const packet = {
         deviceId: rawPacket.deviceId || '',
         deviceName: rawPacket.deviceName || '',
         rssi: rawPacket.rssi || -100,
-        allBytes: new Uint8Array(allBytes),
+        allBytes: extracted.allBytes,
+        buffers: extracted.buffers,
+        debugEntries: extracted.debugEntries,
         timestamp: Date.now()
     };
 
-    let matchedModule = matchModuleForPacket(packet, modules);
+    let decoded = null;
 
-    // 1. Try iBeacon decode
-    let decoded = decodeBeaconMode(packet.allBytes);
+    // Scan all individual buffers and the combined buffer
+    const candidateBuffers = [extracted.allBytes, ...extracted.buffers];
 
-    // 2. Try GATT Encrypted decode with universal key
-    if (!decoded) {
-        decoded = decodeGattMode(packet.allBytes);
+    for (const buf of candidateBuffers) {
+        if (!buf || buf.length < 16) continue;
+
+        // Mode 1: iBeacon
+        decoded = decodeBeaconMode(buf);
+        if (decoded) break;
+
+        // Mode 2: GATT Encrypted
+        decoded = decodeGattMode(buf);
+        if (decoded) break;
     }
 
     if (decoded) {
-        if (!matchedModule && decoded.sensorId && modules && modules.length) {
-            const cleanSensorId = decoded.sensorId.replace(/[^0-9A-F]/g, '');
-            matchedModule = modules.find(m => {
-                const cleanM = (m.mac || '').replace(/[^0-9A-F]/g, '').toUpperCase();
-                return cleanM.includes(cleanSensorId) || cleanSensorId.includes(cleanM);
-            });
+        let matchedModule = matchModuleForPacket(packet, modules, decoded);
+
+        // If only 1 module is configured and no specific match, match it directly
+        if (!matchedModule && modules && modules.length === 1) {
+            matchedModule = modules[0];
         }
 
         return {
             matchedModule: matchedModule,
             data: decoded,
             rssi: packet.rssi,
+            deviceName: packet.deviceName,
+            deviceId: packet.deviceId,
             timestamp: packet.timestamp,
-            rawBytesHex: Array.from(packet.allBytes).map(b => b.toString(16).padStart(2, '0')).join(' ')
+            rawBytesHex: Array.from(extracted.allBytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' '),
+            debugEntries: extracted.debugEntries
         };
     }
 
-    return null;
+    return {
+        matchedModule: null,
+        data: null,
+        rssi: packet.rssi,
+        deviceName: packet.deviceName,
+        deviceId: packet.deviceId,
+        timestamp: packet.timestamp,
+        debugEntries: extracted.debugEntries
+    };
 }
 
 // Export for browser and node
@@ -403,6 +478,7 @@ if (typeof module !== 'undefined' && module.exports) {
         decodeBeaconMode,
         matchModuleForPacket,
         parseTreelQrCode,
+        extractAdvertisementBuffers,
         processBlePacket
     };
 } else {
@@ -417,6 +493,7 @@ if (typeof module !== 'undefined' && module.exports) {
         decodeBeaconMode,
         matchModuleForPacket,
         parseTreelQrCode,
+        extractAdvertisementBuffers,
         processBlePacket
     };
 }

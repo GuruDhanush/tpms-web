@@ -49,10 +49,19 @@
     </div>
 
     <!-- Main Action Toolbar -->
-    <div class="action-toolbar single-btn">
+    <div class="action-toolbar">
       <button class="btn btn-primary" id="btnScanToggle">
         📡 Start Continuous BLE Scan
       </button>
+      <button class="btn btn-secondary btn-sm" id="btnDevicePicker" title="Alternative for Desktop Chrome or direct device selection">
+        💻 Pair Device (Desktop)
+      </button>
+    </div>
+
+    <!-- Detected Unassigned Sensor Banner -->
+    <div id="unassignedBanner" class="banner" style="display:none; flex-direction:column; gap:6px; background: rgba(56, 189, 248, 0.15); border-color: var(--cyan); color: #fff;">
+      <div id="unassignedText"></div>
+      <div id="unassignedActions" style="display:flex; gap:6px; flex-wrap:wrap; margin-top:4px;"></div>
     </div>
 
     <!-- Unit Selector Row -->
@@ -86,7 +95,12 @@
     <div class="terminal-card">
       <div class="terminal-head" id="terminalHead">
         <h3>📟 Live BLE Telemetry Stream</h3>
-        <button class="btn btn-secondary btn-sm" id="btnClearTerminal">Clear</button>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <label style="font-size:0.7rem; color:var(--text-muted); display:inline-flex; align-items:center; gap:4px; cursor:pointer;" onclick="event.stopPropagation();">
+            <input type="checkbox" id="chkVerboseLog"> Raw Log
+          </label>
+          <button class="btn btn-secondary btn-sm" id="btnClearTerminal">Clear</button>
+        </div>
       </div>
       <div class="terminal-body" id="terminalBody">
         <!-- Live telemetry lines appended here -->

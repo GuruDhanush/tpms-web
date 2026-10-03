@@ -465,12 +465,23 @@
             logTerminal('Requesting BLE Advertisement scan...', 'meta');
 
             if (navigator.bluetooth.requestLEScan) {
-                bleScanInstance = await navigator.bluetooth.requestLEScan({
+                // Attach event listener immediately so no incoming packets are missed
+                navigator.bluetooth.addEventListener('advertisementreceived', handleAdvertisementReceived);
+
+                // Start scan with race timeout for Desktop Windows Chrome (where promise can hang after Allow)
+                const scanPromise = navigator.bluetooth.requestLEScan({
                     acceptAllAdvertisements: true,
                     keepRepeatedDevices: true
                 });
 
-                navigator.bluetooth.addEventListener('advertisementreceived', handleAdvertisementReceived);
+                const timeoutPromise = new Promise(resolve => setTimeout(() => resolve('timeout_fallback'), 3500));
+                const outcome = await Promise.race([scanPromise, timeoutPromise]);
+
+                if (outcome && outcome !== 'timeout_fallback') {
+                    bleScanInstance = outcome;
+                } else if (outcome === 'timeout_fallback') {
+                    logTerminal('Desktop note: Prompt confirmed. Active listener attached.', 'meta');
+                }
 
                 isScanning = true;
                 updateBleStatusUI('scanning', 'Scanning Continuously');
@@ -487,15 +498,7 @@
                 logTerminal('Continuous BLE scan running. Waiting for TPMS broadcasts...', 'success');
                 showToast('Continuous BLE scan started!');
             } else {
-                // Fallback for browsers that only support requestDevice
-                logTerminal('requestLEScan not available. Attempting device pairing...', 'warn');
-                const device = await navigator.bluetooth.requestDevice({
-                    acceptAllDevices: true,
-                    optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb']
-                });
-
-                logTerminal(`Device paired: ${device.name || device.id}`, 'success');
-                showToast(`Paired with ${device.name || 'BLE Device'}`);
+                startDevicePickerScan();
             }
         } catch (err) {
             console.error('BLE Scan Error:', err);
@@ -514,6 +517,44 @@
             } else {
                 logTerminal(`BLE Error: ${err.message}`, 'error');
                 showToast(`Scan error: ${err.message}`);
+            }
+        }
+    }
+
+    async function startDevicePickerScan() {
+        if (!navigator.bluetooth) {
+            showToast('Web Bluetooth not supported in this browser.');
+            return;
+        }
+        try {
+            logTerminal('Opening Bluetooth Device Picker...', 'meta');
+            const device = await navigator.bluetooth.requestDevice({
+                acceptAllDevices: true,
+                optionalServices: ['0000ffe0-0000-1000-8000-00805f9b34fb']
+            });
+
+            logTerminal(`Selected Device: "${device.name || 'Unnamed'}" (ID: ${device.id})`, 'success');
+            showToast(`Selected: ${device.name || device.id}`);
+
+            // Listen for advertisement events on selected device if supported
+            if (device.addEventListener) {
+                device.addEventListener('advertisementreceived', handleAdvertisementReceived);
+                if (device.watchAdvertisements) {
+                    await device.watchAdvertisements();
+                    logTerminal(`Watching advertisements for ${device.name || device.id}...`, 'success');
+                }
+            }
+
+            // Also check if device name contains sensor MAC or ID
+            if (device.name) {
+                const parsed = window.TreelDecoder.parseTreelQrCode(device.name);
+                if (parsed && parsed.mac) {
+                    logTerminal(`Extracted Sensor MAC from Device Name: ${parsed.mac}`, 'success');
+                }
+            }
+        } catch (err) {
+            if (err.name !== 'NotFoundError') {
+                logTerminal(`Device Picker Error: ${err.message}`, 'error');
             }
         }
     }
@@ -556,15 +597,71 @@
         };
 
         const result = window.TreelDecoder.processBlePacket(rawPacket, modules);
+
+        const verbose = document.getElementById('chkVerboseLog')?.checked;
+        if (verbose && result && result.debugEntries) {
+            result.debugEntries.forEach(entry => {
+                logTerminal(`[RAW] Dev:${rawPacket.deviceName || 'anon'} (${rawPacket.rssi}dBm) ${entry}`, 'meta');
+            });
+        }
+
         if (result && result.data) {
             if (result.matchedModule) {
                 handleDecodedTelemetry(result.matchedModule, result.data, result.rssi);
             } else {
                 totalTpmsPackets++;
-                logTerminal(`[Unassigned TPMS] ${result.data.pressurePsi} PSI | ${result.data.tempC}°C | ${result.data.mode}`, 'warn');
+                logTerminal(`[UNMATCHED TPMS] ${result.data.pressurePsi} PSI | ${result.data.tempC}°C | ${result.data.mode}`, 'warn');
+                showUnassignedSensorBanner(result);
             }
         }
         updateSummaryHeader();
+    }
+
+    let lastDetectedResult = null;
+    function showUnassignedSensorBanner(result) {
+        lastDetectedResult = result;
+        const banner = document.getElementById('unassignedBanner');
+        const text = document.getElementById('unassignedText');
+        const actions = document.getElementById('unassignedActions');
+        if (!banner || !text || !actions) return;
+
+        text.innerHTML = `🚗 <strong>Detected Active Treel Sensor:</strong> ${result.data.pressurePsi} PSI | ${result.data.tempC}°C | ${result.data.mode} (RSSI: ${result.rssi} dBm). Tap to link to your tire:`;
+
+        let btnHtml = '';
+        modules.forEach(m => {
+            btnHtml += `<button class="btn btn-secondary btn-sm" onclick="window.TreelApp.assignDetectedToTire('${m.id}')">➡️ Assign to ${escapeHtml(m.label)}</button>`;
+        });
+        actions.innerHTML = btnHtml;
+        banner.style.display = 'flex';
+    }
+
+    function assignDetectedToTire(moduleId) {
+        if (!lastDetectedResult) return;
+        const mod = modules.find(m => m.id === moduleId);
+        if (!mod) return;
+
+        // Try extracting MAC or Sensor ID from detected packet
+        let newMac = '';
+        if (lastDetectedResult.deviceId && lastDetectedResult.deviceId.length >= 12) {
+            newMac = lastDetectedResult.deviceId;
+        } else if (lastDetectedResult.data.sensorId) {
+            newMac = lastDetectedResult.data.sensorId.replace(/[^0-9A-F]/g, '');
+        }
+
+        if (newMac) {
+            mod.mac = window.TreelDecoder.normalizeMac(newMac);
+            saveModules();
+            renderTireCards();
+            showToast(`Linked sensor to ${mod.label}!`);
+            logTerminal(`Sensor ${mod.mac} successfully linked to ${mod.label}`, 'success');
+        }
+
+        // Immediately update telemetry
+        handleDecodedTelemetry(mod, lastDetectedResult.data, lastDetectedResult.rssi);
+
+        const banner = document.getElementById('unassignedBanner');
+        if (banner) banner.style.display = 'none';
+        lastDetectedResult = null;
     }
 
     function updateBleStatusUI(status, label) {
@@ -936,6 +1033,7 @@
 
     function setupEventListeners() {
         document.getElementById('btnScanToggle')?.addEventListener('click', toggleBleScan);
+        document.getElementById('btnDevicePicker')?.addEventListener('click', startDevicePickerScan);
         document.getElementById('btnAddSensor')?.addEventListener('click', openAddModal);
         document.getElementById('btnSettings')?.addEventListener('click', openSettingsModal);
         document.getElementById('btnClearTerminal')?.addEventListener('click', clearTerminal);
@@ -989,7 +1087,8 @@
         closeModal,
         closeCameraScanner,
         loadPreset,
-        clearAllStorageData
+        clearAllStorageData,
+        assignDetectedToTire
     };
 
     if (document.readyState === 'loading') {
