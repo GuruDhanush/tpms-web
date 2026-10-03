@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#070b14">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="Mobile Web Bluetooth TPMS Receiver and Decoder for JK Tyre Treel BLE Sensors">
+  <title>TREEL TPMS Live Monitor</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+
+    <!-- Header & Navigation -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-icon">🚗</div>
+        <div class="brand-text">
+          <h1>TREEL TPMS</h1>
+          <span>Continuous BLE Receiver</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="icon-btn" id="btnSettings" title="Thresholds &amp; Settings" aria-label="Settings">⚙️</button>
+      </div>
+    </header>
+
+    <!-- Bluetooth Status Bar -->
+    <div class="status-bar">
+      <div class="ble-pill" id="bleStatusPill">
+        <span class="ble-dot"></span>
+        <span id="bleStatusText">Disconnected</span>
+      </div>
+      <div class="stats-summary">
+        <span>Sensors: <strong id="activeSensorsCount">0/4</strong></span>
+        <span>Packets: <strong id="packetCounters">0/0</strong></span>
+      </div>
+    </div>
+
+    <!-- Web Bluetooth Browser Compatibility Banner (Hidden if supported) -->
+    <div class="banner" id="btSupportBanner" style="display:none;">
+      <span>⚠️</span>
+      <div>
+        <strong>Web Bluetooth Not Detected:</strong>
+        <br>For direct BLE scanning on mobile, open this page in <strong>Google Chrome</strong> (Android) or the <strong>Bluefy</strong> BLE browser (iOS App Store).
+      </div>
+    </div>
+
+    <!-- Main Action Toolbar -->
+    <div class="action-toolbar single-btn">
+      <button class="btn btn-primary" id="btnScanToggle">
+        📡 Start Continuous BLE Scan
+      </button>
+    </div>
+
+    <!-- Unit Selector Row -->
+    <div class="units-bar">
+      <div class="unit-group">
+        <span class="unit-label">Pressure:</span>
+        <button class="seg-btn active" id="btn-unit-psi">PSI</button>
+        <button class="seg-btn" id="btn-unit-bar">BAR</button>
+        <button class="seg-btn" id="btn-unit-kpa">KPA</button>
+      </div>
+      <div class="unit-group">
+        <span class="unit-label">Temp:</span>
+        <button class="seg-btn active" id="btn-temp-c">°C</button>
+        <button class="seg-btn" id="btn-temp-f">°F</button>
+      </div>
+    </div>
+
+    <!-- TPMS Tires Cards Container -->
+    <main class="tires-stack" id="tiresStack">
+      <!-- Rendered dynamically by app.js -->
+    </main>
+
+    <!-- Add Module Button -->
+    <div class="add-sensor-row">
+      <button class="btn-add-module" id="btnAddSensor">
+        <span>➕</span> Add New TPMS Module
+      </button>
+    </div>
+
+    <!-- Live BLE Packet Terminal (Collapsible) -->
+    <div class="terminal-card">
+      <div class="terminal-head" id="terminalHead">
+        <h3>📟 Live BLE Telemetry Stream</h3>
+        <button class="btn btn-secondary btn-sm" id="btnClearTerminal">Clear</button>
+      </div>
+      <div class="terminal-body" id="terminalBody">
+        <!-- Live telemetry lines appended here -->
+      </div>
+    </div>
+
+  </div> <!-- /.app-container -->
+
+  <!-- Toast Notification -->
+  <div class="toast-msg" id="toast">Settings Saved</div>
+
+  <!-- =========================================================================
+       Modal 1: Add / Edit TPMS Sensor Module
+       ========================================================================= -->
+  <div class="modal-backdrop" id="moduleModal">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2 id="modalTitle">Add TPMS Module</h2>
+        <button class="close-btn" onclick="window.TreelApp.closeModal('moduleModal')">&times;</button>
+      </div>
+      <form id="moduleForm">
+        <!-- Quick Position Presets -->
+        <div class="form-group">
+          <label>Position Preset</label>
+          <div class="pill-row">
+            <button type="button" class="preset-pill" data-pos="FL" data-label="Front Left">Front Left (FL)</button>
+            <button type="button" class="preset-pill" data-pos="FR" data-label="Front Right">Front Right (FR)</button>
+            <button type="button" class="preset-pill" data-pos="RL" data-label="Rear Left">Rear Left (RL)</button>
+            <button type="button" class="preset-pill" data-pos="RR" data-label="Rear Right">Rear Right (RR)</button>
+            <button type="button" class="preset-pill" data-pos="SP" data-label="Spare Tire">Spare Tire</button>
+            <button type="button" class="preset-pill" data-pos="FW" data-label="Front Wheel">Bike Front</button>
+            <button type="button" class="preset-pill" data-pos="RW" data-label="Rear Wheel">Bike Rear</button>
+          </div>
+        </div>
+
+        <input type="hidden" id="inputPos" value="FL">
+
+        <div class="form-group">
+          <label for="inputLabel">Label / Tire Name</label>
+          <input type="text" class="input-text" id="inputLabel" placeholder="e.g. Front Left" required>
+        </div>
+
+        <div class="form-group">
+          <label for="inputMac">Sensor MAC Address or Short ID</label>
+          <div class="input-with-btn">
+            <input type="text" class="input-text" id="inputMac" placeholder="e.g. D2:58:6D:8F:16:10 or 8F1610" required>
+            <button type="button" class="btn btn-secondary btn-sm" id="btnScanCamera" title="Scan QR Code from packaging">📷 Scan QR</button>
+          </div>
+          <span class="hint">Found on sensor sticker, box QR code, or JK Tyre SmartTyre app (Settings &rarr; Sensor Debug).</span>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" onclick="window.TreelApp.closeModal('moduleModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary">💾 Save Sensor</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- =========================================================================
+       Modal 2: Camera QR Scanner
+       ========================================================================= -->
+  <div class="modal-backdrop" id="scannerModal">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>📷 Scan Sensor QR Code</h2>
+        <button class="close-btn" id="btnCloseScanner">&times;</button>
+      </div>
+      <div class="qr-scanner-view">
+        <video id="qrVideo" playsinline></video>
+        <div class="qr-overlay"></div>
+      </div>
+      <p id="scannerStatus" class="hint" style="text-align: center; margin-bottom: 12px;">Starting camera...</p>
+      
+      <div class="form-group">
+        <label>Or Upload QR Code Image</label>
+        <input type="file" accept="image/*" class="input-text" id="qrFileInput">
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="window.TreelApp.closeCameraScanner()">Done / Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =========================================================================
+       Modal 3: Settings & Background Keep-Alive
+       ========================================================================= -->
+  <div class="modal-backdrop" id="settingsModal">
+    <div class="modal-sheet">
+      <div class="modal-header">
+        <h2>⚙️ Monitor Settings &amp; Alerts</h2>
+        <button class="close-btn" onclick="window.TreelApp.closeModal('settingsModal')">&times;</button>
+      </div>
+      <form id="settingsForm">
+        <div class="form-group">
+          <label for="cfgMinPsi">Low Pressure Alert (PSI)</label>
+          <input type="number" step="0.5" class="input-text" id="cfgMinPsi" value="26.0" required>
+        </div>
+        <div class="form-group">
+          <label for="cfgMaxPsi">High Pressure Alert (PSI)</label>
+          <input type="number" step="0.5" class="input-text" id="cfgMaxPsi" value="42.0" required>
+        </div>
+        <div class="form-group">
+          <label for="cfgMaxTemp">High Temperature Alert (°C)</label>
+          <input type="number" step="1" class="input-text" id="cfgMaxTemp" value="70.0" required>
+        </div>
+        <div class="form-group">
+          <label for="cfgMinBatt">Low Battery Alert (%)</label>
+          <input type="number" step="1" class="input-text" id="cfgMinBatt" value="15" required>
+        </div>
+
+        <div class="form-group" style="margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border);">
+          <label style="color: var(--cyan); margin-bottom: 8px;">📱 Continuous Background &amp; Driving Mode</label>
+          
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <span style="font-size: 0.82rem;">Prevent Screen Sleep while scanning</span>
+            <input type="checkbox" id="cfgPreventSleep" checked style="width: 18px; height: 18px;">
+          </div>
+          <span class="hint" style="margin-bottom: 10px;">Uses Screen Wake Lock API so the phone display stays awake and doesn't sleep while driving.</span>
+
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+            <span style="font-size: 0.82rem;">Silent Audio Session Keep-Alive</span>
+            <input type="checkbox" id="cfgBackgroundAudio" checked style="width: 18px; height: 18px;">
+          </div>
+          <span class="hint">Prevents iOS / Android from suspending the browser tab when switching apps or locking the screen.</span>
+        </div>
+
+        <div class="form-group" style="margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border);">
+          <label>Reset / Load Presets</label>
+          <div style="display: flex; gap: 8px;">
+            <button type="button" class="btn btn-secondary btn-sm" style="flex:1" onclick="window.TreelApp.loadPreset('car')">🚗 4 Car Wheels</button>
+            <button type="button" class="btn btn-secondary btn-sm" style="flex:1" onclick="window.TreelApp.loadPreset('bike')">🏍️ 2 Bike Wheels</button>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top: 10px;">
+          <button type="button" class="btn btn-secondary btn-sm" style="color: var(--red); width: 100%; border-color: rgba(239,68,68,0.3);" onclick="window.TreelApp.clearAllStorageData()">🗑️ Reset All LocalStorage</button>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" onclick="window.TreelApp.closeModal('settingsModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Settings</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Libraries & Scripts -->
+  <script src="aes-js.js"></script>
+  <script src="decoder.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
